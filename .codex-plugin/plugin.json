@@ -6,8 +6,8 @@
     "name": "Lukas Malkmus",
     "email": "mail@lukasmalkmus.com"
   },
-  "homepage": "https://github.com/lukasmalkmus/moneymoney",
-  "repository": "https://github.com/lukasmalkmus/moneymoney",
+  "homepage": "https://github.com/parithosh/moneymoney",
+  "repository": "https://github.com/parithosh/moneymoney",
   "license": "MIT",
   "keywords": [
     "moneymoney",
@@ -29,7 +29,7 @@
       "Read",
       "Write"
     ],
-    "websiteURL": "https://github.com/lukasmalkmus/moneymoney",
+    "websiteURL": "https://github.com/parithosh/moneymoney",
     "defaultPrompt": [
       "Check my MoneyMoney account balances",
       "Find recent transactions in MoneyMoney"

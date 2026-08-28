@@ -7,37 +7,16 @@
 //! confirm and enter a TAN before money moves.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rust_decimal::Decimal;
 use time::Date;
 
-use crate::applescript::OsascriptRunner;
+use crate::applescript::{OsascriptRunner, string_expression};
 use crate::commands::accounts::{annotate_with_bank, fetch_all};
 use crate::moneymoney::MoneyMoneyError;
 use crate::moneymoney::resolver::Resolver;
-
-/// Reject characters that can't be safely embedded in an `AppleScript`
-/// double-quoted string. `"` and newlines break parsing; backslashes are
-/// permitted and escaped by [`escape_for_script`] (MoneyMoney uses `\` to
-/// separate nested category names, so rejecting it would break legitimate
-/// input).
-pub fn validate_text(field: &'static str, s: &str) -> Result<(), MoneyMoneyError> {
-    for ch in s.chars() {
-        if ch == '"' || ch == '\n' || ch == '\r' {
-            return Err(MoneyMoneyError::InvalidScriptInput { field, ch });
-        }
-    }
-    Ok(())
-}
-
-/// Escape a validated string for interpolation into an `AppleScript`
-/// double-quoted literal. Only `\` needs doubling; `"` and newlines are
-/// rejected upstream by [`validate_text`].
-#[must_use]
-pub fn escape_for_script(s: &str) -> String {
-    s.replace('\\', "\\\\")
-}
+use crate::moneymoney::validation::{normalize_iban, require_positive_amount};
 
 /// Parameters for `mm transfer create`.
 pub struct CreateTransferOptions {
@@ -153,37 +132,31 @@ pub fn build_create_transfer_script(
     from_iban: &str,
     opts: &CreateTransferOptions,
 ) -> Result<String, MoneyMoneyError> {
-    validate_text("from", from_iban)?;
-    validate_text("to", &opts.to_iban)?;
-    if let Some(name) = &opts.to_name {
-        validate_text("name", name)?;
-    }
-    if let Some(purpose) = &opts.purpose {
-        validate_text("purpose", purpose)?;
-    }
-    if let Some(e2e) = &opts.endtoend_reference {
-        validate_text("endtoend reference", e2e)?;
-    }
+    require_positive_amount(opts.amount)?;
+    let to_iban = normalize_iban(&opts.to_iban)?;
 
     let mut parts = vec![
-        format!("from account \"{from_iban}\""),
-        format!("iban \"{}\"", opts.to_iban),
+        format!("from account {}", string_expression(from_iban)),
+        format!("iban {}", string_expression(&to_iban)),
         format!("amount {}", opts.amount),
     ];
     if let Some(name) = &opts.to_name {
-        parts.push(format!("to \"{}\"", escape_for_script(name)));
+        parts.push(format!("to {}", string_expression(name)));
     }
     if let Some(purpose) = &opts.purpose {
-        parts.push(format!("purpose \"{}\"", escape_for_script(purpose)));
+        parts.push(format!("purpose {}", string_expression(purpose)));
     }
     if let Some(e2e) = &opts.endtoend_reference {
-        parts.push(format!("endtoend reference \"{}\"", escape_for_script(e2e)));
+        parts.push(format!("endtoend reference {}", string_expression(e2e)));
     }
     if let Some(date) = opts.scheduled_date {
-        parts.push(format!("scheduled date \"{date}\""));
+        parts.push(format!(
+            "scheduled date {}",
+            string_expression(&date.to_string())
+        ));
     }
     if opts.into_outbox {
-        parts.push("into \"outbox\"".to_owned());
+        parts.push(r#"into "outbox""#.to_owned());
     }
 
     Ok(format!(
@@ -197,36 +170,38 @@ pub fn build_direct_debit_script(
     from_iban: &str,
     opts: &CreateDirectDebitOptions,
 ) -> Result<String, MoneyMoneyError> {
-    validate_text("from", from_iban)?;
-    validate_text("to", &opts.debtor_iban)?;
-    if let Some(name) = &opts.debtor_name {
-        validate_text("name", name)?;
-    }
-    if let Some(purpose) = &opts.purpose {
-        validate_text("purpose", purpose)?;
-    }
-    validate_text("mandate reference", &opts.mandate_reference)?;
+    require_positive_amount(opts.amount)?;
+    let debtor_iban = normalize_iban(&opts.debtor_iban)?;
 
     let mut parts = vec![
-        format!("from account \"{from_iban}\""),
-        format!("iban \"{}\"", opts.debtor_iban),
+        format!("from account {}", string_expression(from_iban)),
+        format!("iban {}", string_expression(&debtor_iban)),
         format!("amount {}", opts.amount),
-        format!("mandate reference \"{}\"", opts.mandate_reference),
+        format!(
+            "mandate reference {}",
+            string_expression(&opts.mandate_reference)
+        ),
     ];
     if let Some(name) = &opts.debtor_name {
-        parts.push(format!("for \"{}\"", escape_for_script(name)));
+        parts.push(format!("for {}", string_expression(name)));
     }
     if let Some(purpose) = &opts.purpose {
-        parts.push(format!("purpose \"{}\"", escape_for_script(purpose)));
+        parts.push(format!("purpose {}", string_expression(purpose)));
     }
     if let Some(date) = opts.mandate_date {
-        parts.push(format!("mandate date \"{date}\""));
+        parts.push(format!(
+            "mandate date {}",
+            string_expression(&date.to_string())
+        ));
     }
     if let Some(date) = opts.scheduled_date {
-        parts.push(format!("scheduled date \"{date}\""));
+        parts.push(format!(
+            "scheduled date {}",
+            string_expression(&date.to_string())
+        ));
     }
     if opts.into_outbox {
-        parts.push("into \"outbox\"".to_owned());
+        parts.push(r#"into "outbox""#.to_owned());
     }
 
     Ok(format!(
@@ -237,15 +212,66 @@ pub fn build_direct_debit_script(
 
 /// Build the `create batch {transfer,direct debit}` `AppleScript` string.
 pub fn build_batch_script(opts: &BatchTransferOptions) -> Result<String, MoneyMoneyError> {
-    let path = opts.sepa_xml_path.to_string_lossy().into_owned();
-    validate_text("file path", &path)?;
-    let verb = if opts.direct_debit {
+    let path = validate_batch_file_in(
+        &opts.sepa_xml_path,
+        &crate::statements::container_data_root(),
+    )?;
+    build_batch_script_for_path(&path, opts.direct_debit)
+}
+
+fn validate_batch_file_in(path: &Path, root: &Path) -> Result<PathBuf, MoneyMoneyError> {
+    if root.as_os_str().is_empty() {
+        return Err(MoneyMoneyError::InvalidBatchFile(
+            "MoneyMoney container root could not be determined".to_owned(),
+        ));
+    }
+    let root = std::fs::canonicalize(root).map_err(|error| {
+        MoneyMoneyError::InvalidBatchFile(format!(
+            "MoneyMoney container '{}' is unavailable: {error}",
+            root.display()
+        ))
+    })?;
+    let path = std::fs::canonicalize(path).map_err(|error| {
+        MoneyMoneyError::InvalidBatchFile(format!("'{}': {error}", path.display()))
+    })?;
+    if !path.starts_with(&root) {
+        return Err(MoneyMoneyError::InvalidBatchFile(format!(
+            "'{}' is outside '{}'",
+            path.display(),
+            root.display()
+        )));
+    }
+    if !path.is_file() {
+        return Err(MoneyMoneyError::InvalidBatchFile(format!(
+            "'{}' is not a regular file",
+            path.display()
+        )));
+    }
+    let is_xml = path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("xml"));
+    if !is_xml {
+        return Err(MoneyMoneyError::InvalidBatchFile(format!(
+            "'{}' must have an .xml extension",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
+fn build_batch_script_for_path(path: &Path, direct_debit: bool) -> Result<String, MoneyMoneyError> {
+    let path = path.to_str().ok_or_else(|| {
+        MoneyMoneyError::InvalidBatchFile(format!("'{}' is not valid UTF-8", path.display()))
+    })?;
+    let verb = if direct_debit {
         "create batch direct debit"
     } else {
         "create batch transfer"
     };
     Ok(format!(
-        "tell application \"MoneyMoney\" to {verb} from POSIX file \"{path}\""
+        "tell application \"MoneyMoney\" to {verb} from POSIX file {}",
+        string_expression(path)
     ))
 }
 
@@ -294,17 +320,29 @@ mod tests {
     }
 
     #[test]
-    fn quote_in_purpose_is_rejected() {
+    fn quote_in_purpose_is_encoded() {
         let mut opts = base_create();
         opts.purpose = Some(r#"He said "hi""#.to_owned());
-        let err = build_create_transfer_script("DE92500105175437633269", &opts).unwrap_err();
-        match err {
-            MoneyMoneyError::InvalidScriptInput { field, ch } => {
-                assert_eq!(field, "purpose");
-                assert_eq!(ch, '"');
-            }
-            other => panic!("expected InvalidScriptInput, got {other:?}"),
-        }
+        let script = build_create_transfer_script("DE92500105175437633269", &opts).unwrap();
+        assert!(script.contains("(ASCII character 34)"));
+        assert!(!script.contains(r#"purpose "He said "hi""#));
+    }
+
+    #[test]
+    fn transfer_requires_valid_iban_and_positive_amount() {
+        let mut opts = base_create();
+        opts.to_iban = "DE001234".to_owned();
+        assert!(matches!(
+            build_create_transfer_script("DE92500105175437633269", &opts),
+            Err(MoneyMoneyError::InvalidIban(_))
+        ));
+
+        opts.to_iban = "DE89370400440532013000".to_owned();
+        opts.amount = Decimal::NEGATIVE_ONE;
+        assert!(matches!(
+            build_create_transfer_script("DE92500105175437633269", &opts),
+            Err(MoneyMoneyError::InvalidAmount(_))
+        ));
     }
 
     #[test]
@@ -330,15 +368,29 @@ mod tests {
 
     #[test]
     fn batch_script_uses_posix_file() {
-        let opts = BatchTransferOptions {
-            sepa_xml_path: PathBuf::from("/tmp/sepa.xml"),
-            direct_debit: false,
-            format: None,
-        };
-        let script = build_batch_script(&opts).unwrap();
+        let script = build_batch_script_for_path(Path::new("/tmp/sepa.xml"), false).unwrap();
         assert_eq!(
             script,
             r#"tell application "MoneyMoney" to create batch transfer from POSIX file "/tmp/sepa.xml""#
         );
+    }
+
+    #[test]
+    fn batch_file_must_be_inside_allowed_root() {
+        let base = std::env::temp_dir().join(format!("mm-batch-test-{}", std::process::id()));
+        let allowed = base.join("allowed");
+        let inside = allowed.join("batch.xml");
+        let outside = base.join("outside.xml");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::write(&inside, "<Document/>").unwrap();
+        std::fs::write(&outside, "<Document/>").unwrap();
+
+        assert_eq!(
+            validate_batch_file_in(&inside, &allowed).unwrap(),
+            std::fs::canonicalize(&inside).unwrap()
+        );
+        assert!(validate_batch_file_in(&outside, &allowed).is_err());
+
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

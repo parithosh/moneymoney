@@ -3,8 +3,7 @@
   "name": "moneymoney",
   "description": "Agent-native access to MoneyMoney accounts, transactions, categories, portfolios, and bank statements via the `mm` CLI and an MCP server over stdio.",
   "owner": {
-    "name": "Lukas Malkmus",
-    "email": "mail@lukasmalkmus.com"
+    "name": "parithosh"
   },
   "plugins": [
     {
@@ -16,8 +15,8 @@
       "author": {
         "name": "Lukas Malkmus"
       },
-      "homepage": "https://github.com/lukasmalkmus/moneymoney",
-      "repository": "https://github.com/lukasmalkmus/moneymoney",
+      "homepage": "https://github.com/parithosh/moneymoney",
+      "repository": "https://github.com/parithosh/moneymoney",
       "license": "MIT",
       "category": "finance",
       "keywords": [

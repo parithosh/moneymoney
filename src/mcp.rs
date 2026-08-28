@@ -1,11 +1,9 @@
 //! MCP server — stdio tools exposing the same surface as the `mm` CLI.
 //!
-//! Read tools are marked `readOnlyHint: true`. Write tools
-//! (`create_transfer`, `create_direct_debit`, `create_batch_transfer`,
-//! `add_transaction`, `set_transaction`) are NOT read-only; `set_transaction`
-//! is additionally marked `destructiveHint: true` because it silently
-//! overwrites metadata. Transfer verbs are safe by construction — the user
-//! confirms them in the MoneyMoney GUI and enters a TAN.
+//! The server has no network transport. Read tools are always available.
+//! Write tools are hidden and rejected unless the process starts with
+//! `MM_ENABLE_WRITES=true`; annotations remain advisory metadata rather than
+//! an authorization boundary.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,15 +21,26 @@ use tokio::sync::Mutex;
 
 use crate::applescript::{OsascriptRunner, TokioOsascriptRunner};
 use crate::commands::accounts::{annotate_with_bank, fetch_all};
+use crate::commands::portfolio::build_export_script as build_portfolio_script;
 use crate::commands::status;
 use crate::commands::transaction_edit::{AddOptions as TxAddOptions, SetOptions as TxSetOptions};
-use crate::commands::transactions::build_export_script;
+use crate::commands::transactions::build_export_script as build_transactions_script;
 use crate::commands::transfer::{
     BatchTransferOptions, CreateDirectDebitOptions, CreateTransferOptions,
 };
 use crate::moneymoney::resolver::Resolver;
 use crate::moneymoney::types::{Category, Transaction};
+use crate::moneymoney::validation::{parse_amount as parse_validated_amount, validate_date_range};
 use crate::statements;
+use crate::writes::WritePolicy;
+
+const WRITE_TOOL_NAMES: [&str; 5] = [
+    "create_transfer",
+    "create_direct_debit",
+    "create_batch_transfer",
+    "add_transaction",
+    "set_transaction",
+];
 
 /// Parameters for the `get_account` tool.
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -186,17 +195,27 @@ pub struct Server {
     // isn't concurrency-safe.
     guard: Arc<Mutex<()>>,
     aliases: Arc<HashMap<String, String>>,
+    write_policy: WritePolicy,
     tool_router: ToolRouter<Self>,
 }
 
 impl Server {
     #[must_use]
-    pub fn new(aliases: HashMap<String, String>) -> Self {
+    pub fn new(aliases: HashMap<String, String>, write_policy: WritePolicy) -> Self {
+        let mut tool_router = Self::tool_router();
+        if !write_policy.is_enabled() {
+            for name in WRITE_TOOL_NAMES {
+                let disabled = tool_router.disable_route(name);
+                debug_assert!(disabled, "write tool {name} must exist");
+            }
+        }
+
         Self {
             runner: Arc::new(TokioOsascriptRunner),
             guard: Arc::new(Mutex::new(())),
             aliases: Arc::new(aliases),
-            tool_router: Self::tool_router(),
+            tool_router,
+            write_policy,
         }
     }
 }
@@ -255,24 +274,25 @@ impl Server {
         &self,
         args: Parameters<ListTransactionsArgs>,
     ) -> Result<String, rmcp::ErrorData> {
+        let fmt = time::macros::format_description!("[year]-[month]-[day]");
+        let today = time::OffsetDateTime::now_utc().date();
+        let from = match &args.0.from {
+            Some(s) => time::Date::parse(s, &fmt).map_err(to_invalid_params)?,
+            None => today - time::Duration::days(90),
+        };
+        let to = match &args.0.to {
+            Some(s) => time::Date::parse(s, &fmt).map_err(to_invalid_params)?,
+            None => today,
+        };
+        validate_date_range(from, to).map_err(to_invalid_params)?;
+
         let _g = self.guard.lock().await;
         let raw = fetch_all(&*self.runner).await.map_err(to_mcp_err)?;
         let rows = annotate_with_bank(raw);
         let resolver = Resolver::new(rows, (*self.aliases).clone());
         let row = resolver.resolve(&args.0.account).map_err(to_mcp_err)?;
-
-        let fmt = time::macros::format_description!("[year]-[month]-[day]");
-        let today = time::OffsetDateTime::now_utc().date();
-        let from = match &args.0.from {
-            Some(s) => time::Date::parse(s, &fmt).map_err(to_mcp_err)?,
-            None => today - time::Duration::days(90),
-        };
-        let to = match &args.0.to {
-            Some(s) => time::Date::parse(s, &fmt).map_err(to_mcp_err)?,
-            None => today,
-        };
-
-        let script = build_export_script(&row.account.account_number, from, to);
+        let script = build_transactions_script(&row.account.account_number, from, to)
+            .map_err(to_invalid_params)?;
         let envelope: crate::moneymoney::types::TransactionsEnvelope =
             crate::applescript::run_plist(&*self.runner, &script)
                 .await
@@ -326,10 +346,7 @@ impl Server {
         let rows = annotate_with_bank(raw);
         let resolver = Resolver::new(rows, (*self.aliases).clone());
         let row = resolver.resolve(&args.0.account).map_err(to_mcp_err)?;
-        let script = format!(
-            "tell application \"MoneyMoney\" to export portfolio from account \"{}\" as \"plist\"",
-            row.account.account_number
-        );
+        let script = build_portfolio_script(&row.account.account_number);
         let envelope: crate::moneymoney::types::PortfolioEnvelope =
             crate::applescript::run_plist(&*self.runner, &script)
                 .await
@@ -414,7 +431,7 @@ impl Server {
             &row.account.account_number,
             &opts,
         )
-        .map_err(to_mcp_err)?;
+        .map_err(to_invalid_params)?;
         self.runner.run(&script).await.map_err(to_mcp_err)?;
         Ok(confirmation_json(opts.into_outbox, "bank transfer"))
     }
@@ -450,7 +467,7 @@ impl Server {
             &row.account.account_number,
             &opts,
         )
-        .map_err(to_mcp_err)?;
+        .map_err(to_invalid_params)?;
         self.runner.run(&script).await.map_err(to_mcp_err)?;
         Ok(confirmation_json(opts.into_outbox, "direct debit"))
     }
@@ -470,7 +487,8 @@ impl Server {
             direct_debit: args.0.direct_debit,
             format: None,
         };
-        let script = crate::commands::transfer::build_batch_script(&opts).map_err(to_mcp_err)?;
+        let script =
+            crate::commands::transfer::build_batch_script(&opts).map_err(to_invalid_params)?;
         self.runner.run(&script).await.map_err(to_mcp_err)?;
         let verb = if opts.direct_debit {
             "batch direct debit"
@@ -525,16 +543,14 @@ impl Server {
             format: None,
         };
         let script = crate::commands::transaction_edit::build_set_transaction_script(&opts)
-            .map_err(to_mcp_err)?;
+            .map_err(to_invalid_params)?;
         self.runner.run(&script).await.map_err(to_mcp_err)?;
         Ok(serde_json::json!({"message": "transaction metadata updated"}).to_string())
     }
 }
 
 fn parse_amount(s: &str) -> Result<rust_decimal::Decimal, rmcp::ErrorData> {
-    use std::str::FromStr as _;
-    rust_decimal::Decimal::from_str(s.trim())
-        .map_err(|e| rmcp::ErrorData::invalid_params(format!("invalid amount '{s}': {e}"), None))
+    parse_validated_amount(s).map_err(to_invalid_params)
 }
 
 fn parse_date(s: &str) -> Result<time::Date, rmcp::ErrorData> {
@@ -564,13 +580,18 @@ fn confirmation_json(into_outbox: bool, verb: &str) -> String {
 #[allow(clippy::unused_async_trait_impl)] // rmcp's macro generates a ready-future impl
 impl ServerHandler for Server {
     fn get_info(&self) -> ServerInfo {
+        let write_state = if self.write_policy.is_enabled() {
+            "Write tools are enabled for this process."
+        } else {
+            "Write tools are disabled; restart with MM_ENABLE_WRITES=true to enable them."
+        };
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("moneymoney", env!("CARGO_PKG_VERSION")))
-            .with_instructions(
-                "Read-only access to MoneyMoney accounts, transactions, categories, \
+            .with_instructions(format!(
+                "Local stdio access to MoneyMoney accounts, transactions, categories, \
                  portfolios, and on-disk bank statements. MoneyMoney must be running and \
-                 unlocked. Use `status` first when debugging.",
-            )
+                 unlocked. Use `status` first when debugging. {write_state}"
+            ))
     }
 }
 
@@ -578,11 +599,47 @@ fn to_mcp_err<E: std::fmt::Display>(err: E) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(err.to_string(), None)
 }
 
-/// `mm mcp` entrypoint — spawn the stdio MCP server and block until the
-/// client disconnects.
-pub async fn run(aliases: HashMap<String, String>) -> anyhow::Result<()> {
-    let server = Server::new(aliases);
+fn to_invalid_params<E: std::fmt::Display>(err: E) -> rmcp::ErrorData {
+    rmcp::ErrorData::invalid_params(err.to_string(), None)
+}
+
+/// `mm mcp` entrypoint — serve JSON-RPC exclusively over stdin/stdout and
+/// block until the local client disconnects.
+pub async fn run(
+    aliases: HashMap<String, String>,
+    write_policy: WritePolicy,
+) -> anyhow::Result<()> {
+    let server = Server::new(aliases, write_policy);
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_only_server_hides_and_disables_write_tools() {
+        let server = Server::new(HashMap::new(), WritePolicy::from_value(None));
+
+        assert!(server.tool_router.has_route("status"));
+        for name in WRITE_TOOL_NAMES {
+            assert!(!server.tool_router.has_route(name));
+            assert!(server.tool_router.is_disabled(name));
+        }
+    }
+
+    #[test]
+    fn explicit_policy_exposes_write_tools() {
+        let server = Server::new(
+            HashMap::new(),
+            WritePolicy::from_value(Some(std::ffi::OsStr::new("true"))),
+        );
+
+        for name in WRITE_TOOL_NAMES {
+            assert!(server.tool_router.has_route(name));
+            assert!(!server.tool_router.is_disabled(name));
+        }
+    }
 }

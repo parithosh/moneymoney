@@ -48,21 +48,25 @@ pub enum StatementsError {
     Io(#[from] std::io::Error),
 }
 
-/// Default location of the Statements folder.
+/// Root of MoneyMoney's application-container data.
 #[must_use]
-pub fn default_root() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
-        return home
-            .join("Library")
+pub fn container_data_root() -> PathBuf {
+    dirs::home_dir().map_or_else(PathBuf::new, |home| {
+        home.join("Library")
             .join("Containers")
             .join("com.moneymoney-app.retail")
             .join("Data")
-            .join("Library")
-            .join("Application Support")
-            .join("MoneyMoney")
-            .join("Statements");
-    }
-    PathBuf::new()
+    })
+}
+
+/// Default location of the Statements folder.
+#[must_use]
+pub fn default_root() -> PathBuf {
+    container_data_root()
+        .join("Library")
+        .join("Application Support")
+        .join("MoneyMoney")
+        .join("Statements")
 }
 
 static FILENAME_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {

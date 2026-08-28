@@ -11,10 +11,12 @@ mod mcp;
 mod moneymoney;
 mod output;
 mod statements;
+mod writes;
 
 use applescript::TokioOsascriptRunner;
 use moneymoney::MoneyMoneyError;
 use output::{FieldFilterError, OutputFormat};
+use writes::WritePolicy;
 
 #[derive(Parser)]
 #[command(
@@ -105,6 +107,12 @@ enum Command {
     /// Work with transactions (offline-account entries and metadata edits).
     #[command(subcommand)]
     Transaction(TransactionCommand),
+}
+
+impl Command {
+    const fn is_write(&self) -> bool {
+        matches!(self, Self::Transfer(_) | Self::Transaction(_))
+    }
 }
 
 #[derive(Subcommand)]
@@ -329,7 +337,9 @@ fn main() -> ExitCode {
         }
     };
 
-    let result = runtime.block_on(run(cli.command, aliases));
+    let write_policy = WritePolicy::from_env();
+
+    let result = runtime.block_on(run(cli.command, aliases, write_policy));
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -352,7 +362,11 @@ fn main() -> ExitCode {
 async fn run(
     command: Command,
     aliases: std::collections::HashMap<String, String>,
+    write_policy: WritePolicy,
 ) -> anyhow::Result<()> {
+    if command.is_write() {
+        write_policy.require()?;
+    }
     match command {
         Command::Version => {
             println!("mm {}", env!("CARGO_PKG_VERSION"));
@@ -455,7 +469,7 @@ async fn run(
                 stdout,
             }),
         },
-        Command::Mcp => mcp::run(aliases).await,
+        Command::Mcp => mcp::run(aliases, write_policy).await,
         Command::Transfer(sub) => match sub {
             TransferCommand::Create {
                 from,
@@ -585,17 +599,7 @@ fn parse_ymd(s: &str) -> Result<time::Date, String> {
 }
 
 fn parse_amount(s: &str) -> Result<rust_decimal::Decimal, String> {
-    use std::str::FromStr as _;
-    let trimmed = s.trim();
-    let d = rust_decimal::Decimal::from_str(trimmed)
-        .map_err(|e| format!("invalid amount '{s}': {e}"))?;
-    if d.is_zero() {
-        return Err("amount must be non-zero".to_owned());
-    }
-    if d.scale() > 4 {
-        return Err(format!("amount '{s}' has too many decimal places (max 4)"));
-    }
-    Ok(d)
+    moneymoney::validation::parse_amount(s).map_err(|error| error.to_string())
 }
 
 fn exit_code(err: &anyhow::Error) -> u8 {
@@ -608,15 +612,20 @@ fn exit_code(err: &anyhow::Error) -> u8 {
             MoneyMoneyError::NotInstalled
             | MoneyMoneyError::NotSupported
             | MoneyMoneyError::ScriptError(_)
+            | MoneyMoneyError::ScriptTimeout { .. }
+            | MoneyMoneyError::ScriptOutputTooLarge { .. }
             | MoneyMoneyError::Spawn(_)
             | MoneyMoneyError::PlistDecode(_) => 4,
             MoneyMoneyError::AccountNotFound(_) => 3,
-            MoneyMoneyError::AmbiguousAccount { .. }
+            MoneyMoneyError::WritesDisabled
+            | MoneyMoneyError::AmbiguousAccount { .. }
             | MoneyMoneyError::InvalidIban(_)
+            | MoneyMoneyError::InvalidAmount(_)
+            | MoneyMoneyError::InvalidDateRange { .. }
+            | MoneyMoneyError::InvalidBatchFile(_)
             | MoneyMoneyError::AccountIsGroup(_)
             | MoneyMoneyError::AliasCycle(_)
-            | MoneyMoneyError::AccountNotOffline(_)
-            | MoneyMoneyError::InvalidScriptInput { .. } => 2,
+            | MoneyMoneyError::AccountNotOffline(_) => 2,
         };
     }
     1
@@ -632,16 +641,21 @@ fn error_code(err: &anyhow::Error) -> &'static str {
             MoneyMoneyError::NotRunning => "not_running",
             MoneyMoneyError::NotInstalled => "not_installed",
             MoneyMoneyError::NotSupported => "not_supported",
+            MoneyMoneyError::WritesDisabled => "writes_disabled",
             MoneyMoneyError::ScriptError(_) => "script_error",
+            MoneyMoneyError::ScriptTimeout { .. } => "script_timeout",
+            MoneyMoneyError::ScriptOutputTooLarge { .. } => "script_output_too_large",
             MoneyMoneyError::Spawn(_) => "spawn_error",
             MoneyMoneyError::PlistDecode(_) => "plist_decode_error",
             MoneyMoneyError::AccountNotFound(_) => "account_not_found",
             MoneyMoneyError::AmbiguousAccount { .. } => "ambiguous_account",
             MoneyMoneyError::InvalidIban(_) => "invalid_iban",
+            MoneyMoneyError::InvalidAmount(_) => "invalid_amount",
+            MoneyMoneyError::InvalidDateRange { .. } => "invalid_date_range",
+            MoneyMoneyError::InvalidBatchFile(_) => "invalid_batch_file",
             MoneyMoneyError::AccountIsGroup(_) => "account_is_group",
             MoneyMoneyError::AliasCycle(_) => "alias_cycle",
             MoneyMoneyError::AccountNotOffline(_) => "account_not_offline",
-            MoneyMoneyError::InvalidScriptInput { .. } => "invalid_script_input",
         };
     }
     "general_error"

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::applescript::{OsascriptRunner, run_plist};
+use crate::applescript::{OsascriptRunner, run_plist, string_expression};
 use crate::commands::accounts::{annotate_with_bank, fetch_all};
 use crate::moneymoney::resolver::Resolver;
 use crate::moneymoney::types::{PortfolioEnvelope, Security};
@@ -89,10 +89,7 @@ pub async fn run<R: OsascriptRunner>(runner: &R, opts: GetOptions) -> anyhow::Re
     let resolver = Resolver::new(rows, opts.aliases);
     let account_row = resolver.resolve(&opts.reference)?;
 
-    let script = format!(
-        "tell application \"MoneyMoney\" to export portfolio from account \"{}\" as \"plist\"",
-        account_row.account.account_number
-    );
+    let script = build_export_script(&account_row.account.account_number);
     let envelope: PortfolioEnvelope = run_plist(runner, &script).await?;
 
     let total = envelope.portfolio.len();
@@ -103,4 +100,24 @@ pub async fn run<R: OsascriptRunner>(runner: &R, opts: GetOptions) -> anyhow::Re
         .map(FieldFilter::parse::<Security>)
         .transpose()?;
     format_list(&envelope.portfolio, total, format, filter.as_ref())
+}
+
+#[must_use]
+pub fn build_export_script(account: &str) -> String {
+    format!(
+        "tell application \"MoneyMoney\" to export portfolio from account {} as \"plist\"",
+        string_expression(account)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_script_encodes_account_identifier() {
+        let script = build_export_script(r#"portfolio" & bad"#);
+        assert!(script.contains("(ASCII character 34)"));
+        assert!(!script.contains(r#""portfolio" & bad""#));
+    }
 }

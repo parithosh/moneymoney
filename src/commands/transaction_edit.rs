@@ -11,9 +11,8 @@ use std::collections::HashMap;
 use rust_decimal::Decimal;
 use time::Date;
 
-use crate::applescript::OsascriptRunner;
+use crate::applescript::{OsascriptRunner, string_expression};
 use crate::commands::accounts::{annotate_with_bank, fetch_all};
-use crate::commands::transfer::{escape_for_script, validate_text};
 use crate::moneymoney::MoneyMoneyError;
 use crate::moneymoney::resolver::Resolver;
 
@@ -62,7 +61,7 @@ pub async fn run_add<R: OsascriptRunner>(runner: &R, opts: &AddOptions) -> anyho
         .into());
     }
 
-    let script = build_add_transaction_script(&row.account.account_number, opts)?;
+    let script = build_add_transaction_script(&row.account.account_number, opts);
     runner.run(&script).await?;
     announce(opts.format, "transaction added to offline account");
     Ok(())
@@ -101,36 +100,24 @@ fn announce(format: Option<crate::output::OutputFormat>, message: &str) {
 }
 
 /// Build the `add transaction` `AppleScript` string.
-pub fn build_add_transaction_script(
-    account_id: &str,
-    opts: &AddOptions,
-) -> Result<String, MoneyMoneyError> {
-    validate_text("account", account_id)?;
-    validate_text("name", &opts.name)?;
-    if let Some(purpose) = &opts.purpose {
-        validate_text("purpose", purpose)?;
-    }
-    if let Some(category) = &opts.category {
-        validate_text("category", category)?;
-    }
-
+pub fn build_add_transaction_script(account_id: &str, opts: &AddOptions) -> String {
     let mut parts = vec![
-        format!("to account \"{}\"", escape_for_script(account_id)),
-        format!("on date \"{}\"", opts.date),
-        format!("to \"{}\"", escape_for_script(&opts.name)),
+        format!("to account {}", string_expression(account_id)),
+        format!("on date {}", string_expression(&opts.date.to_string())),
+        format!("to {}", string_expression(&opts.name)),
         format!("amount {}", opts.amount),
     ];
     if let Some(purpose) = &opts.purpose {
-        parts.push(format!("purpose \"{}\"", escape_for_script(purpose)));
+        parts.push(format!("purpose {}", string_expression(purpose)));
     }
     if let Some(category) = &opts.category {
-        parts.push(format!("category \"{}\"", escape_for_script(category)));
+        parts.push(format!("category {}", string_expression(category)));
     }
 
-    Ok(format!(
+    format!(
         "tell application \"MoneyMoney\" to add transaction {}",
         parts.join(" ")
-    ))
+    )
 }
 
 /// Build the `set transaction` `AppleScript` string.
@@ -150,12 +137,10 @@ pub fn build_set_transaction_script(opts: &SetOptions) -> Result<String, MoneyMo
         ));
     }
     if let Some(category) = &opts.category {
-        validate_text("category", category)?;
-        parts.push(format!("category to \"{}\"", escape_for_script(category)));
+        parts.push(format!("category to {}", string_expression(category)));
     }
     if let Some(comment) = &opts.comment {
-        validate_text("comment", comment)?;
-        parts.push(format!("comment to \"{}\"", escape_for_script(comment)));
+        parts.push(format!("comment to {}", string_expression(comment)));
     }
 
     Ok(format!(
@@ -187,7 +172,7 @@ mod tests {
             aliases: HashMap::new(),
             format: None,
         };
-        let script = build_add_transaction_script("CASH", &opts).unwrap();
+        let script = build_add_transaction_script("CASH", &opts);
         assert_eq!(
             script,
             r#"tell application "MoneyMoney" to add transaction to account "CASH" on date "2026-01-15" to "Coffee" amount -3.50 purpose "morning" category "Food\\Coffee""#

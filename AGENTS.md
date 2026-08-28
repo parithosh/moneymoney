@@ -2,7 +2,7 @@
 
 Agent-native CLI (`mm`) and MCP server for [MoneyMoney](https://moneymoney.app/).
 
-**Repository:** `~/Code/Private/moneymoney`
+**Repository:** `https://github.com/parithosh/moneymoney`
 
 ## CLI Shape (target)
 
@@ -25,6 +25,9 @@ mm transaction set <id> [--checkmark] [--category "..."] [--comment "..."]
 mm mcp
 mm version
 ```
+
+Write commands require `MM_ENABLE_WRITES=true`. The MCP server hides and
+rejects write tools unless it starts with that exact value.
 
 `REF` = account UUID, IBAN, account number, alias (from config), `Bank/Name`
 path, or bare name (rejected with candidate list when ambiguous).
@@ -90,4 +93,4 @@ cargo fmt --check
 
 ## Skills
 
-- `skills/mm/SKILL.md` — agent workflow guide (read-only `allowed-tools`)
+- `skills/moneymoney/SKILL.md` — agent workflow guide (read-only `allowed-tools`)
