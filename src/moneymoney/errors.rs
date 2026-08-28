@@ -51,10 +51,18 @@ pub enum MoneyMoneyError {
     #[error("AppleScript error: {0}")]
     ScriptError(String),
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "constructed only by the macOS process runner")
+    )]
     /// `osascript` exceeded the fixed execution deadline.
     #[error("AppleScript timed out after {seconds} seconds")]
     ScriptTimeout { seconds: u64 },
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "constructed only by the macOS process runner")
+    )]
     /// `osascript` emitted more data than the bounded capture permits.
     #[error("AppleScript {stream} exceeded the {limit}-byte limit")]
     ScriptOutputTooLarge { stream: &'static str, limit: usize },
