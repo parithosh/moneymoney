@@ -7,6 +7,8 @@
 //! confirm and enter a TAN before money moves.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use rust_decimal::Decimal;
@@ -86,13 +88,36 @@ pub async fn run_direct_debit<R: OsascriptRunner>(
     Ok(())
 }
 
+/// Prepare and retain a private snapshot of the SEPA XML while MoneyMoney
+/// imports it.
+pub(crate) struct PreparedBatch {
+    script: String,
+    #[allow(
+        dead_code,
+        reason = "ownership retains and deletes the staging file after AppleScript completes"
+    )]
+    staged: tempfile::NamedTempFile,
+}
+
+impl PreparedBatch {
+    #[must_use]
+    pub(crate) fn script(&self) -> &str {
+        &self.script
+    }
+}
+
+/// Copy a confined SEPA XML file into a private staging file.
+pub(crate) fn prepare_batch(opts: &BatchTransferOptions) -> Result<PreparedBatch, MoneyMoneyError> {
+    prepare_batch_in(opts, &crate::statements::container_data_root())
+}
+
 /// `mm transfer batch` — load a SEPA XML file.
 pub async fn run_batch<R: OsascriptRunner>(
     runner: &R,
     opts: &BatchTransferOptions,
 ) -> anyhow::Result<()> {
-    let script = build_batch_script(opts)?;
-    runner.run(&script).await?;
+    let prepared = prepare_batch(opts)?;
+    runner.run(prepared.script()).await?;
     let verb = if opts.direct_debit {
         "batch direct debit"
     } else {
@@ -210,16 +235,32 @@ pub fn build_direct_debit_script(
     ))
 }
 
-/// Build the `create batch {transfer,direct debit}` `AppleScript` string.
-pub fn build_batch_script(opts: &BatchTransferOptions) -> Result<String, MoneyMoneyError> {
-    let path = validate_batch_file_in(
-        &opts.sepa_xml_path,
-        &crate::statements::container_data_root(),
-    )?;
-    build_batch_script_for_path(&path, opts.direct_debit)
+fn prepare_batch_in(
+    opts: &BatchTransferOptions,
+    root: &Path,
+) -> Result<PreparedBatch, MoneyMoneyError> {
+    let (mut source, root) = open_batch_file_in(&opts.sepa_xml_path, root)?;
+    let mut staged = tempfile::Builder::new()
+        .prefix(".mm-batch-")
+        .suffix(".xml")
+        .tempfile_in(&root)
+        .map_err(|error| {
+            MoneyMoneyError::InvalidBatchFile(format!(
+                "failed to create a private staging file in '{}': {error}",
+                root.display()
+            ))
+        })?;
+    io::copy(&mut source, staged.as_file_mut()).map_err(|error| {
+        MoneyMoneyError::InvalidBatchFile(format!(
+            "failed to snapshot '{}': {error}",
+            opts.sepa_xml_path.display()
+        ))
+    })?;
+    let script = build_batch_script_for_path(staged.path(), opts.direct_debit)?;
+    Ok(PreparedBatch { script, staged })
 }
 
-fn validate_batch_file_in(path: &Path, root: &Path) -> Result<PathBuf, MoneyMoneyError> {
+fn open_batch_file_in(path: &Path, root: &Path) -> Result<(File, PathBuf), MoneyMoneyError> {
     if root.as_os_str().is_empty() {
         return Err(MoneyMoneyError::InvalidBatchFile(
             "MoneyMoney container root could not be determined".to_owned(),
@@ -241,12 +282,6 @@ fn validate_batch_file_in(path: &Path, root: &Path) -> Result<PathBuf, MoneyMone
             root.display()
         )));
     }
-    if !path.is_file() {
-        return Err(MoneyMoneyError::InvalidBatchFile(format!(
-            "'{}' is not a regular file",
-            path.display()
-        )));
-    }
     let is_xml = path
         .extension()
         .and_then(std::ffi::OsStr::to_str)
@@ -257,7 +292,80 @@ fn validate_batch_file_in(path: &Path, root: &Path) -> Result<PathBuf, MoneyMone
             path.display()
         )));
     }
-    Ok(path)
+    let relative = path.strip_prefix(&root).map_err(|error| {
+        MoneyMoneyError::InvalidBatchFile(format!(
+            "'{}' is not reachable from '{}': {error}",
+            path.display(),
+            root.display()
+        ))
+    })?;
+    let source = open_confined_regular_file(&root, relative).map_err(|error| {
+        MoneyMoneyError::InvalidBatchFile(format!(
+            "failed to securely open '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if !source
+        .metadata()
+        .map_err(|error| {
+            MoneyMoneyError::InvalidBatchFile(format!(
+                "failed to inspect '{}': {error}",
+                path.display()
+            ))
+        })?
+        .is_file()
+    {
+        return Err(MoneyMoneyError::InvalidBatchFile(format!(
+            "'{}' is not a regular file",
+            path.display()
+        )));
+    }
+    Ok((source, root))
+}
+
+#[cfg(unix)]
+fn open_confined_regular_file(root: &Path, relative: &Path) -> io::Result<File> {
+    use std::path::Component;
+
+    use rustix::fs::{Mode, OFlags, open, openat};
+
+    let directory_flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY | OFlags::NOFOLLOW;
+    let file_flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let mut directory = open(root, directory_flags, Mode::empty())?;
+    let mut components = relative.components().peekable();
+
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "batch path contains a non-normal component",
+            ));
+        };
+        let is_file = components.peek().is_none();
+        let opened = openat(
+            &directory,
+            name,
+            if is_file { file_flags } else { directory_flags },
+            Mode::empty(),
+        )?;
+        if is_file {
+            return Ok(File::from(opened));
+        }
+        directory = opened;
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "batch path names the container root",
+    ))
+}
+
+#[cfg(not(unix))]
+fn open_confined_regular_file(_root: &Path, _relative: &Path) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "secure batch staging requires Unix file-descriptor APIs",
+    ))
 }
 
 fn build_batch_script_for_path(path: &Path, direct_debit: bool) -> Result<String, MoneyMoneyError> {
@@ -270,7 +378,7 @@ fn build_batch_script_for_path(path: &Path, direct_debit: bool) -> Result<String
         "create batch transfer"
     };
     Ok(format!(
-        "tell application \"MoneyMoney\" to {verb} from POSIX file {}",
+        "tell application \"MoneyMoney\" to {verb} from POSIX file ({})",
         string_expression(path)
     ))
 }
@@ -367,30 +475,56 @@ mod tests {
     }
 
     #[test]
-    fn batch_script_uses_posix_file() {
+    fn batch_script_groups_posix_file_expression() {
         let script = build_batch_script_for_path(Path::new("/tmp/sepa.xml"), false).unwrap();
         assert_eq!(
             script,
-            r#"tell application "MoneyMoney" to create batch transfer from POSIX file "/tmp/sepa.xml""#
+            r#"tell application "MoneyMoney" to create batch transfer from POSIX file ("/tmp/sepa.xml")"#
+        );
+
+        let quoted =
+            build_batch_script_for_path(Path::new(r#"/tmp/sepa "quoted".xml"#), false).unwrap();
+        assert_eq!(
+            quoted,
+            r#"tell application "MoneyMoney" to create batch transfer from POSIX file ("/tmp/sepa " & (ASCII character 34) & "quoted" & (ASCII character 34) & ".xml")"#
         );
     }
 
     #[test]
-    fn batch_file_must_be_inside_allowed_root() {
-        let base = std::env::temp_dir().join(format!("mm-batch-test-{}", std::process::id()));
-        let allowed = base.join("allowed");
+    fn batch_file_is_snapshotted_inside_allowed_root() {
+        let base = tempfile::tempdir().unwrap();
+        let allowed = base.path().join("allowed");
         let inside = allowed.join("batch.xml");
-        let outside = base.join("outside.xml");
+        let outside = base.path().join("outside.xml");
         std::fs::create_dir_all(&allowed).unwrap();
-        std::fs::write(&inside, "<Document/>").unwrap();
-        std::fs::write(&outside, "<Document/>").unwrap();
+        std::fs::write(&inside, "<Document>original</Document>").unwrap();
+        std::fs::write(&outside, "<Document>outside</Document>").unwrap();
+        let opts = BatchTransferOptions {
+            sepa_xml_path: inside.clone(),
+            direct_debit: false,
+            format: None,
+        };
 
+        let prepared = prepare_batch_in(&opts, &allowed).unwrap();
+        let staged_path = prepared.staged.path().to_owned();
+        assert!(staged_path.starts_with(std::fs::canonicalize(&allowed).unwrap()));
         assert_eq!(
-            validate_batch_file_in(&inside, &allowed).unwrap(),
-            std::fs::canonicalize(&inside).unwrap()
+            std::fs::read_to_string(&staged_path).unwrap(),
+            "<Document>original</Document>"
         );
-        assert!(validate_batch_file_in(&outside, &allowed).is_err());
+        std::fs::write(&inside, "<Document>replaced</Document>").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&staged_path).unwrap(),
+            "<Document>original</Document>"
+        );
+        drop(prepared);
+        assert!(!staged_path.exists());
 
-        std::fs::remove_dir_all(base).unwrap();
+        let outside_opts = BatchTransferOptions {
+            sepa_xml_path: outside,
+            direct_debit: false,
+            format: None,
+        };
+        assert!(prepare_batch_in(&outside_opts, &allowed).is_err());
     }
 }

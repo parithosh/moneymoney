@@ -59,14 +59,21 @@ pub fn container_data_root() -> PathBuf {
     })
 }
 
-/// Default location of the Statements folder.
-#[must_use]
-pub fn default_root() -> PathBuf {
-    container_data_root()
+fn statements_root(container_root: &Path) -> PathBuf {
+    if container_root.as_os_str().is_empty() {
+        return PathBuf::new();
+    }
+    container_root
         .join("Library")
         .join("Application Support")
         .join("MoneyMoney")
         .join("Statements")
+}
+
+/// Default location of the Statements folder.
+#[must_use]
+pub fn default_root() -> PathBuf {
+    statements_root(&container_data_root())
 }
 
 static FILENAME_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
@@ -300,5 +307,9 @@ mod tests {
         let s = stmt("ING", "Girokonto_5437633269_Kontoauszug_20250601.pdf");
         assert!(matches_account(&s, ""));
         assert!(matches_account(&s, "   "));
+    }
+    #[test]
+    fn missing_home_keeps_empty_statement_root() {
+        assert!(statements_root(Path::new("")).as_os_str().is_empty());
     }
 }

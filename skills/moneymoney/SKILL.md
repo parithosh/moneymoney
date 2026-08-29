@@ -42,25 +42,27 @@ User wants…
   ├── Portfolio holdings ─────── mm portfolio --account <DEPOT-REF>
   ├── Bank statement PDFs ────── mm statements list [--account <REF>] [--since YYYY-MM-DD]
   │     └── Retrieve a PDF ──── mm statements get <FILENAME>
-  ├── Send money / pay invoice ─ MM_ENABLE_WRITES=true mm transfer create --from <REF> --to <IBAN> --amount X.XX --purpose "..."
+  ├── Send money / pay invoice ─ mm transfer create --from <REF> --to <IBAN> --amount X.XX --purpose "..."
   │     └── Hold for later ──── add --into-outbox (lands in Ausgangskorb)
-  ├── Direct debit ───────────── MM_ENABLE_WRITES=true mm transfer direct-debit --from <REF> --to <IBAN> --amount X.XX --mandate <MANDATE-ID>
-  ├── SEPA XML batch ─────────── MM_ENABLE_WRITES=true mm transfer batch <file.xml>
-  ├── Add offline entry ──────── MM_ENABLE_WRITES=true mm transaction add --account <OFFLINE-REF> --amount X.XX --purpose "..."
-  └── Edit transaction meta ─── MM_ENABLE_WRITES=true mm transaction set <ID> [--checkmark] [--category "..."] [--comment "..."]
+  ├── Direct debit ───────────── mm transfer direct-debit --from <REF> --to <IBAN> --amount X.XX --mandate <MANDATE-ID>
+  ├── SEPA XML batch ─────────── mm transfer batch <file.xml>
+  ├── Add offline entry ──────── mm transaction add --account <OFFLINE-REF> --amount X.XX --purpose "..."
+  └── Edit transaction meta ─── mm transaction set <ID> [--checkmark] [--category "..."] [--comment "..."]
 ```
 
 ## Actions (Capability- and Permission-Gated)
 
-Writes require `MM_ENABLE_WRITES=true`; without that exact process-start
-capability, `mm` rejects them. `mm transfer *` and `mm transaction *` are also
-intentionally absent from `allowed-tools`, so Claude Code prompts for approval
-on every call. SEPA transfers additionally require confirmation and TAN entry
-inside MoneyMoney.
+Writes require the host process to have started with `MM_ENABLE_WRITES=true`;
+without that exact externally supplied capability, `mm` rejects them. Never
+add or override `MM_ENABLE_WRITES` in an agent-issued command. `mm transfer *`
+and `mm transaction *` are also intentionally absent from `allowed-tools`, so
+Claude Code prompts for approval on every call. SEPA transfers additionally
+require confirmation and TAN entry inside MoneyMoney.
 
-If the user asks to write, do not claim that no tools exist. Confirm the exact
-parameters, then run the command with the environment prefix. The host
-permission prompt remains mandatory.
+If the user asks to write, confirm the exact parameters and run the bare `mm`
+command. If the host did not grant the capability before the agent session
+started, report the rejection and ask the user to configure the host; do not
+self-enable it. The host permission prompt remains mandatory.
 
 ### Worked example — pay an invoice PDF
 
@@ -70,7 +72,7 @@ permission prompt remains mandatory.
 2. Echo the parsed fields back to the user and get a "go ahead".
 3. Pick a source account (usually the main Girokonto unless the
    user says otherwise).
-4. MM_ENABLE_WRITES=true mm transfer create \
+4. mm transfer create \
      --from "ING/Girokonto" \
      --to   "DE17500400000076139950" \
      --name "Anke Irma Johannmeier" \
@@ -83,7 +85,7 @@ permission prompt remains mandatory.
 ### Worked example — queue for later (`--into-outbox`)
 
 ```
-MM_ENABLE_WRITES=true mm transfer create --from "ING/Girokonto" --to "DE..." \
+mm transfer create --from "ING/Girokonto" --to "DE..." \
   --amount 50.00 --purpose "Rent April" --into-outbox
 ```
 
@@ -93,9 +95,9 @@ releasing them as a batch).
 
 ### Silent mutators — warn before running
 
-`MM_ENABLE_WRITES=true mm transaction set` overwrites `--comment` and
-`--category` without a second MoneyMoney prompt or an undo. Before calling it,
-confirm the target transaction ID and the new value(s) with the user.
+`mm transaction set` overwrites `--comment` and `--category` without a
+second MoneyMoney prompt or an undo. Before calling it, confirm the target
+transaction ID and the new value(s) with the user.
 `--checkmark` is reversible by running `set` again with the opposite value.
 
 ## Bank Statements — Always Examine PDF Content
@@ -216,7 +218,7 @@ directly.
 | Running commands while app is locked | `mm status` first, then retry | Database access fails silently otherwise |
 | Searching transactions without a date range | Always pass `--from` / `--to` | Default range is last 90 days |
 | Answering a statement question from filenames alone | `mm statements get` + `Read` the PDF | Statements are PDFs — their content is the answer |
-| "I can't make transfers — I have no tools for that" | Use `MM_ENABLE_WRITES=true mm transfer create`; the host prompts for approval and MoneyMoney still requires GUI+TAN | Writes require both the process capability and explicit host permission |
+| "I can't make transfers — I have no tools for that" | Run bare `mm transfer create` only when the host granted writes before the session | The agent must not add `MM_ENABLE_WRITES=true`; host approval and MoneyMoney GUI+TAN are still required |
 | `Read` fails with "too many pages" on a statement PDF | Retry with `pages: "1-20"` (and further chunks) | Claude Code caps unguided PDF reads at 20 pages |
 | `mm transactions --from 2024-…` returns zero and you conclude "no data" | Switch to `mm statements list` + Read the monthly PDFs | Banks purge transactions after ~90 days; PDFs always contain the full history |
 | `mm statements list --account "ING/Girokonto"` returns empty | `ls "$HOME/Library/Containers/com.moneymoney-app.retail/Data/Library/Application Support/MoneyMoney/Statements/ING/"` and Read the paths directly | Filename filter is heuristic; bypass it when it misses |

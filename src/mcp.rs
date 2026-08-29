@@ -487,9 +487,12 @@ impl Server {
             direct_debit: args.0.direct_debit,
             format: None,
         };
-        let script =
-            crate::commands::transfer::build_batch_script(&opts).map_err(to_invalid_params)?;
-        self.runner.run(&script).await.map_err(to_mcp_err)?;
+        let prepared =
+            crate::commands::transfer::prepare_batch(&opts).map_err(to_invalid_params)?;
+        self.runner
+            .run(prepared.script())
+            .await
+            .map_err(to_mcp_err)?;
         let verb = if opts.direct_debit {
             "batch direct debit"
         } else {
