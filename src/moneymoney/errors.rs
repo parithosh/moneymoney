@@ -1,6 +1,7 @@
 //! Error types for MoneyMoney operations.
 
 use thiserror::Error;
+use time::Date;
 
 /// Errors returned from the MoneyMoney AppleScript surface and related
 /// filesystem / decoding steps.
@@ -40,14 +41,34 @@ pub enum MoneyMoneyError {
     #[error("MoneyMoney integration is only supported on macOS")]
     NotSupported,
 
+    /// Financial mutations are disabled unless the process starts with the
+    /// explicit write capability.
+    #[error("writes are disabled; set MM_ENABLE_WRITES=true before starting mm")]
+    WritesDisabled,
+
     /// AppleScript execution failed. Carries the stderr output from
     /// `osascript` for diagnosis.
     #[error("AppleScript error: {0}")]
     ScriptError(String),
 
-    /// Launching `osascript` failed (e.g., binary missing on a broken macOS
-    /// install).
-    #[error("failed to invoke osascript: {0}")]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "constructed only by the macOS process runner")
+    )]
+    /// `osascript` exceeded the fixed execution deadline.
+    #[error("AppleScript timed out after {seconds} seconds")]
+    ScriptTimeout { seconds: u64 },
+
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "constructed only by the macOS process runner")
+    )]
+    /// `osascript` emitted more data than the bounded capture permits.
+    #[error("AppleScript {stream} exceeded the {limit}-byte limit")]
+    ScriptOutputTooLarge { stream: &'static str, limit: usize },
+
+    /// Launching or communicating with `osascript` failed.
+    #[error("failed to invoke or communicate with osascript: {0}")]
     Spawn(#[from] std::io::Error),
 
     /// The plist returned by MoneyMoney could not be decoded.
@@ -85,11 +106,18 @@ pub enum MoneyMoneyError {
     #[error("'{0}' is not an offline account; `add transaction` would fail")]
     AccountNotOffline(String),
 
-    /// User input contained characters that can't be safely embedded in an
-    /// AppleScript double-quoted string (e.g. `"`, newlines). Rejected at
-    /// input time rather than escaped.
-    #[error("input field {field} contains forbidden character: {ch:?}")]
-    InvalidScriptInput { field: &'static str, ch: char },
+    /// A monetary amount failed parsing or domain validation.
+    #[error("invalid amount: {0}")]
+    InvalidAmount(String),
+
+    /// A transaction range ends before it starts.
+    #[error("invalid date range: {from} is after {to}")]
+    InvalidDateRange { from: Date, to: Date },
+
+    /// A SEPA batch path is outside MoneyMoney's container or not a regular
+    /// XML file.
+    #[error("invalid SEPA batch file: {0}")]
+    InvalidBatchFile(String),
 }
 
 /// Convenience [`Result`] alias used throughout the [`moneymoney`](crate::moneymoney)

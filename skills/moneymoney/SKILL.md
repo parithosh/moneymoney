@@ -47,21 +47,22 @@ User wants…
   ├── Direct debit ───────────── mm transfer direct-debit --from <REF> --to <IBAN> --amount X.XX --mandate <MANDATE-ID>
   ├── SEPA XML batch ─────────── mm transfer batch <file.xml>
   ├── Add offline entry ──────── mm transaction add --account <OFFLINE-REF> --amount X.XX --purpose "..."
-  └── Edit transaction meta ─── mm transaction set <UUID> [--checkmark] [--category "..."] [--comment "..."]
+  └── Edit transaction meta ─── mm transaction set <ID> [--checkmark] [--category "..."] [--comment "..."]
 ```
 
-## Actions (Permission-Prompted)
+## Actions (Capability- and Permission-Gated)
 
-**These ARE available.** `mm transfer *` and `mm transaction *` are
-intentionally not in `allowed-tools` — Claude Code prompts for your
-approval on every call. SEPA transfers additionally require
-confirmation and TAN entry inside MoneyMoney's own window, so money
-never moves without two explicit human gates.
+Writes require the host process to have started with `MM_ENABLE_WRITES=true`;
+without that exact externally supplied capability, `mm` rejects them. Never
+add or override `MM_ENABLE_WRITES` in an agent-issued command. `mm transfer *`
+and `mm transaction *` are also intentionally absent from `allowed-tools`, so
+Claude Code prompts for approval on every call. SEPA transfers additionally
+require confirmation and TAN entry inside MoneyMoney.
 
-If the user says "Überweisung", "überweisen", "Lastschrift", "SEPA",
-"transfer", "send money", or "pay this invoice", do **not** reply "I
-have no tools for that." Draft the command, confirm the parameters
-with the user, and run it. The permission prompt is the safety net.
+If the user asks to write, confirm the exact parameters and run the bare `mm`
+command. If the host did not grant the capability before the agent session
+started, report the rejection and ask the user to configure the host; do not
+self-enable it. The host permission prompt remains mandatory.
 
 ### Worked example — pay an invoice PDF
 
@@ -94,11 +95,10 @@ releasing them as a batch).
 
 ### Silent mutators — warn before running
 
-`mm transaction set` overwrites `--comment` and `--category` without
-prompting a second time and without an undo. Before calling it,
-confirm the target transaction UUID and the new value(s) with the
-user. `--checkmark` is reversible (just run `set` again with the
-opposite value).
+`mm transaction set` overwrites `--comment` and `--category` without a
+second MoneyMoney prompt or an undo. Before calling it, confirm the target
+transaction ID and the new value(s) with the user.
+`--checkmark` is reversible by running `set` again with the opposite value.
 
 ## Bank Statements — Always Examine PDF Content
 
@@ -218,7 +218,7 @@ directly.
 | Running commands while app is locked | `mm status` first, then retry | Database access fails silently otherwise |
 | Searching transactions without a date range | Always pass `--from` / `--to` | Default range is last 90 days |
 | Answering a statement question from filenames alone | `mm statements get` + `Read` the PDF | Statements are PDFs — their content is the answer |
-| "I can't make transfers — I have no tools for that" | Use `mm transfer create`; Claude Code prompts for approval, MoneyMoney's GUI+TAN is the real gate | Write verbs exist; they are only kept out of `allowed-tools` so every call requires explicit approval |
+| "I can't make transfers — I have no tools for that" | Run bare `mm transfer create` only when the host granted writes before the session | The agent must not add `MM_ENABLE_WRITES=true`; host approval and MoneyMoney GUI+TAN are still required |
 | `Read` fails with "too many pages" on a statement PDF | Retry with `pages: "1-20"` (and further chunks) | Claude Code caps unguided PDF reads at 20 pages |
 | `mm transactions --from 2024-…` returns zero and you conclude "no data" | Switch to `mm statements list` + Read the monthly PDFs | Banks purge transactions after ~90 days; PDFs always contain the full history |
 | `mm statements list --account "ING/Girokonto"` returns empty | `ls "$HOME/Library/Containers/com.moneymoney-app.retail/Data/Library/Application Support/MoneyMoney/Statements/ING/"` and Read the paths directly | Filename filter is heuristic; bypass it when it misses |

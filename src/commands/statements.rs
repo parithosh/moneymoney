@@ -116,7 +116,7 @@ pub fn run_get(opts: &GetOptions) -> anyhow::Result<()> {
     if opts.open {
         #[cfg(target_os = "macos")]
         {
-            std::process::Command::new("open")
+            std::process::Command::new("/usr/bin/open")
                 .arg(&found.path)
                 .status()?;
         }

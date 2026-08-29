@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Disable CLI and MCP writes unless `MM_ENABLE_WRITES=true`; read-only MCP
+  servers hide and reject all five write tools.
+- Encode every AppleScript string, bound `osascript` execution time and
+  captured output, use absolute system executable paths, and validate transfer
+  IBANs and amounts.
+- Snapshot SEPA batch files through no-follow, descriptor-relative opens before
+  MoneyMoney imports them, preventing path-swap escapes from its container.
+- Keep write capability host-controlled; agent guidance never self-enables it.
+- Remove plugin-managed binary downloads and macOS quarantine removal.
+- Pin GitHub Actions to immutable commits and remove prebuilt release
+  automation until a signed, verified distribution path exists.
+
+### Fixed
+
+- Preserve an empty statement root when the home directory is unavailable and
+  group encoded batch paths before AppleScript's `POSIX file` coercion.
+- Canonicalize plugin `PATH` directories so a symlinked shim cannot execute
+  itself recursively.
+
+### Changed
+
+- Make `parithosh/moneymoney` the canonical upstream and require source-built
+  installation for the fork.
+- Keep MCP transport local to stdio with rmcp default features disabled.
+
+### Added
+
+- Document the trust boundaries and private vulnerability reporting process in
+  `SECURITY.md`.
+
 ## [0.7.1] - 2026-08-24
 
 ### Changed

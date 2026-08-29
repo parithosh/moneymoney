@@ -48,21 +48,32 @@ pub enum StatementsError {
     Io(#[from] std::io::Error),
 }
 
-/// Default location of the Statements folder.
+/// Root of MoneyMoney's application-container data.
 #[must_use]
-pub fn default_root() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
-        return home
-            .join("Library")
+pub fn container_data_root() -> PathBuf {
+    dirs::home_dir().map_or_else(PathBuf::new, |home| {
+        home.join("Library")
             .join("Containers")
             .join("com.moneymoney-app.retail")
             .join("Data")
-            .join("Library")
-            .join("Application Support")
-            .join("MoneyMoney")
-            .join("Statements");
+    })
+}
+
+fn statements_root(container_root: &Path) -> PathBuf {
+    if container_root.as_os_str().is_empty() {
+        return PathBuf::new();
     }
-    PathBuf::new()
+    container_root
+        .join("Library")
+        .join("Application Support")
+        .join("MoneyMoney")
+        .join("Statements")
+}
+
+/// Default location of the Statements folder.
+#[must_use]
+pub fn default_root() -> PathBuf {
+    statements_root(&container_data_root())
 }
 
 static FILENAME_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
@@ -296,5 +307,9 @@ mod tests {
         let s = stmt("ING", "Girokonto_5437633269_Kontoauszug_20250601.pdf");
         assert!(matches_account(&s, ""));
         assert!(matches_account(&s, "   "));
+    }
+    #[test]
+    fn missing_home_keeps_empty_statement_root() {
+        assert!(statements_root(Path::new("")).as_os_str().is_empty());
     }
 }
